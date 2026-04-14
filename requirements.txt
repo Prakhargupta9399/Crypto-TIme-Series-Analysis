@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pandas
+numpy
+yfinance
+statsmodels
+prophet
+streamlit
+plotly
+requests
+textblob
+pydantic
+python-multipart

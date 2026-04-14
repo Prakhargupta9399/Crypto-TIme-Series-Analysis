@@ -1,0 +1,79 @@
+import streamlit as st
+import requests
+import pandas as pd
+import plotly.graph_objects as go
+from textblob import TextBlob
+
+# Configuration
+st.set_page_config(page_title="CryptoTime Analytics", layout="wide")
+
+# Constants
+API_URL = "http://localhost:8000"
+
+# Sidebar
+st.sidebar.header("Dashboard Controls")
+days_to_predict = st.sidebar.slider("Forecasting Horizon (Days)", 7, 90, 30)
+
+st.sidebar.divider()
+st.sidebar.subheader("Sentiment Analysis Tool")
+user_text = st.sidebar.text_area("Analyze News/Tweets Sentiment:", "Bitcoin is looking bullish!")
+
+if st.sidebar.button("Analyze Sentiment"):
+    score = TextBlob(user_text).sentiment.polarity
+    if score > 0:
+        st.sidebar.success(f"Positive Sentiment: {score:.2f} 😊")
+    elif score < 0:
+        st.sidebar.error(f"Negative Sentiment: {score:.2f} 😟")
+    else:
+        st.sidebar.info("Neutral Sentiment 😐")
+
+# Main Title
+st.title("₿ CryptoTime Analytics Dashboard")
+
+# 1. Real-Time Metrics
+try:
+    kpi_res = requests.get(f"{API_URL}/api/kpi", timeout=5)
+    if kpi_res.status_code == 200:
+        kpi = kpi_res.json()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Current Price", f"${kpi['current_price']:,.2f}")
+        c2.metric("24h Change", f"{kpi['price_change_24h']}%")
+        c3.metric("Market Cap", kpi['market_cap'])
+        c4.metric("24h Volume", kpi['volume_24h'])
+    else:
+        st.error(f"Backend Error: {kpi_res.text}")
+except Exception as e:
+    st.error("⚠️ Backend not detected. Please run 'python main.py' in a separate terminal.")
+    st.stop()
+
+# 2. Forecasting
+st.divider()
+st.subheader("Price Prediction")
+
+if st.button("Generate Forecasts"):
+    with st.spinner("Running ARIMA, LSTM, and Prophet models... (This may take a moment)"):
+        try:
+            res = requests.get(f"{API_URL}/api/predict/all?days={days_to_predict}", timeout=120)
+            if res.status_code == 200:
+                data = res.json()
+                df_pred = pd.DataFrame(data['predictions'])
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df_pred['date'], y=df_pred['arima'], name="ARIMA", mode='lines'))
+                fig.add_trace(go.Scatter(x=df_pred['date'], y=df_pred['prophet'], name="Prophet", mode='lines'))
+                fig.add_trace(go.Scatter(x=df_pred['date'], y=df_pred['lstm'], name="LSTM", mode='lines'))
+                
+                fig.update_layout(
+                    title="Cryptocurrency Price Prediction", 
+                    template="plotly_dark",
+                    xaxis_title="Date",
+                    yaxis_title="Price (USD)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                with st.expander("View Raw Prediction Data"):
+                    st.dataframe(df_pred)
+            else:
+                st.error(f"Prediction Error: {res.text}")
+        except Exception as e:
+            st.error(f"Connection Error: {e}")
