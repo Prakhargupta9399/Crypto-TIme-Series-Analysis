@@ -13,7 +13,10 @@ from datetime import datetime, timedelta
 import os
 import warnings
 from statsmodels.tsa.arima.model import ARIMA
-from prophet import Prophet
+
+# FIX 1: Removed "from prophet import Prophet"
+# Prophet requires cmdstanpy/pystan backend which fails to install on most systems,
+# crashing the entire server at startup. Replaced with a numpy-only trend model below.
 
 warnings.filterwarnings('ignore')
 
@@ -58,27 +61,19 @@ class KPIResponse(BaseModel):
 def load_cleaned_data():
     """Load cleaned Bitcoin data from CSV"""
     file_path = 'data/bitcoin_data_cleaned.csv'
-    
+
     if not os.path.exists(file_path):
         print(f"Error: File not found at {file_path}")
         return pd.DataFrame()
-    
+
     try:
-        # Read CSV normally since it has headers from the setup script
         df = pd.read_csv(file_path)
-        
-        # Convert Date
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        
-        # Convert numeric cols
         numeric_cols = ['Close', 'High', 'Low', 'Open', 'Volume']
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        # Drop invalid rows and sort
         df = df.dropna(subset=['Date', 'Close']).sort_values('Date')
-        
         return df
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -92,11 +87,7 @@ def calculate_moving_average(df, window=30):
 
 @app.get("/")
 async def root():
-    return {
-        "message": "CryptoTime Analytics API",
-        "status": "online",
-        "docs": "/docs"
-    }
+    return {"message": "CryptoTime Analytics API", "status": "online", "docs": "/docs"}
 
 @app.get("/api/health")
 async def health_check():
@@ -110,31 +101,26 @@ async def health_check():
 @app.get("/api/kpi", response_model=KPIResponse)
 async def get_kpi_metrics():
     df = load_cleaned_data()
-    
+
     if df.empty:
         raise HTTPException(status_code=404, detail="Data file not found or empty. Run setup_data.py first.")
 
     current_price = float(df['Close'].iloc[-1])
-    
-    # Calculate changes
     price_change_24h = 0.0
     price_change_30d = 0.0
-    
+
     if len(df) > 1:
         price_24h_ago = float(df['Close'].iloc[-2])
         price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
-        
+
     if len(df) > 30:
         price_30d_ago = float(df['Close'].iloc[-31])
         price_change_30d = ((current_price - price_30d_ago) / price_30d_ago) * 100
 
-    # Market Cap approx (19.5M BTC supply)
     market_cap = f"${(current_price * 19.5e6 / 1e12):.2f}T"
-    
-    # Volume
     vol_val = float(df['Volume'].iloc[-1])
     volume_24h = f"${(vol_val / 1e9):.2f}B"
-    
+
     return KPIResponse(
         current_price=current_price,
         price_change_24h=round(price_change_24h, 2),
@@ -147,66 +133,84 @@ async def get_kpi_metrics():
 
 @app.get("/api/predict/all")
 async def predict_all_models(days: int = Query(default=30)):
-    """Get predictions from ARIMA and Prophet models"""
+    """Get predictions from ARIMA, Trend (Prophet), and LSTM models"""
     df = load_cleaned_data()
-    
+
     if df.empty or len(df) < 60:
         raise HTTPException(status_code=400, detail="Insufficient data for prediction (need >60 records)")
 
-    # Prepare data
-    prices = df['Close'].values
-    last_date = df['Date'].iloc[-1]
-    
+    prices = df["Close"].values.astype(float)
+    prices = prices[~np.isnan(prices)]  # strip NaNs before any math
+
+    # FIX 2: Always predict forward from TODAY, not the last date in the CSV.
+    # Old code used df['Date'].iloc[-1] which was the training cutoff (e.g. Jan 27),
+    # making all "future" predictions land in the past.
+    last_date = datetime.today()
+
     # --- ARIMA ---
     try:
         model = ARIMA(prices, order=(5, 1, 0))
         model_fit = model.fit()
-        arima_forecast = model_fit.forecast(steps=days)
+        arima_forecast = list(model_fit.forecast(steps=days))
     except Exception as e:
         print(f"ARIMA Error: {e}")
-        arima_forecast = [prices[-1]] * days # Fallback
+        arima_forecast = [float(prices[-1])] * days
 
-    # --- Prophet ---
+    # --- Prophet replacement: Weighted MA + Linear Trend (no install required) ---
     prophet_preds = []
     try:
-        prophet_df = df[['Date', 'Close']].copy()
-        prophet_df.columns = ['ds', 'y']
-        
-        m = Prophet(daily_seasonality=True)
-        m.fit(prophet_df)
-        
-        future = m.make_future_dataframe(periods=days)
-        forecast = m.predict(future)
-        
-        # Extract only future predictions
-        forecast_tail = forecast.tail(days)
-        prophet_preds = forecast_tail['yhat'].tolist()
+        window = min(30, len(prices))
+        weights = np.linspace(1, 3, window)
+        weights /= weights.sum()
+        wma_base = float(np.dot(prices[-window:], weights))
+
+        trend_window = min(60, len(prices))
+        x = np.arange(trend_window)
+        y = prices[-trend_window:]
+        slope, _ = np.polyfit(x, y, 1)
+
+        for i in range(days):
+            dampen = 1 / (1 + 0.02 * i)
+            pred = wma_base + slope * (i + 1) * dampen
+            prophet_preds.append(float(max(pred, 0)))
     except Exception as e:
-        print(f"Prophet Error: {e}")
-        prophet_preds = [prices[-1]] * days
+        print(f"Trend Model Error: {e}")
+        prophet_preds = [float(prices[-1])] * days
 
-    # --- LSTM (Simulated/Simplified) ---
-    # In a real scenario, this requires a trained ML model. 
-    # We simulate it based on recent trend for this demo.
-    last_price = prices[-1]
+    # --- LSTM (trend simulation) ---
+    # FIX 3: Old code set last_price = pred inside the loop which caused
+    # compounding — prices diverged to unrealistic values over 30-90 days.
+    # Now we calculate each prediction independently from the original base price.
     lstm_preds = []
-    for i in range(days):
-        # Simple trend simulation
-        pred = last_price * (1 + 0.001 * (i+1)) 
-        lstm_preds.append(pred)
-        last_price = pred
+    try:
+        base_price = float(prices[-1])
+        # Use recent 7-day momentum to set direction
+        if len(prices) >= 7:
+            momentum = (prices[-1] - prices[-7]) / prices[-7] / 7  # daily % change
+        else:
+            momentum = 0.001
+        # Cap momentum to avoid absurd forecasts (max ±2% per day)
+        momentum = max(min(momentum, 0.02), -0.02)
 
-    # Combine
-    combined = []
-    prediction_dates = [last_date + timedelta(days=i+1) for i in range(days)]
-    
-    for i in range(days):
-        combined.append({
+        for i in range(days):
+            # Independent from base — no compounding divergence
+            pred = base_price * (1 + momentum * (i + 1))
+            lstm_preds.append(float(max(pred, 0)))
+    except Exception as e:
+        print(f"LSTM Error: {e}")
+        lstm_preds = [float(prices[-1])] * days
+
+    # --- Combine ---
+    prediction_dates = [last_date + timedelta(days=i + 1) for i in range(days)]
+    combined = [
+        {
             'date': prediction_dates[i].strftime('%Y-%m-%d'),
-            'arima': float(arima_forecast[i]),
-            'prophet': float(prophet_preds[i]),
-            'lstm': float(lstm_preds[i])
-        })
+            'arima': arima_forecast[i],
+            'prophet': prophet_preds[i],
+            'lstm': lstm_preds[i]
+        }
+        for i in range(days)
+    ]
 
     return {
         "status": "success",
