@@ -2,9 +2,28 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.graph_objects as go
-from textblob import TextBlob
 import yfinance as yf
 from datetime import datetime, timedelta
+
+
+
+# ── Built-in sentiment scorer (no downloads required) ──────────────────────
+def get_sentiment_score(text: str) -> float:
+    """Returns polarity in [-1, +1]. Positive = bullish, negative = bearish."""
+    pos = {"good","great","bull","bullish","up","rise","rising","surge","surging",
+           "gain","gains","growth","rally","strong","positive","profit","profits",
+           "win","winning","buy","moon","mooning","pumping","pump","amazing",
+           "excellent","recover","recovery","high","higher","best","love","loved",
+           "green","optimistic","promising","soar","soaring","boom","booming"}
+    neg = {"bad","bear","bearish","down","fall","falling","crash","crashing",
+           "drop","dropping","loss","losses","weak","negative","sell","dump",
+           "dumping","fear","fearful","panic","terrible","worst","decline",
+           "declining","low","lower","red","pessimistic","collapse","collapsing",
+           "broke","broken","risk","risky","danger","dangerous","scam","fraud"}
+    words = text.lower().split()
+    score = sum(1 for w in words if w in pos) - sum(1 for w in words if w in neg)
+    total = len(words) if words else 1
+    return max(-1.0, min(1.0, score / total * 3))
 
 # Configuration
 st.set_page_config(page_title="CryptoTime Analytics", layout="wide", initial_sidebar_state="expanded")
@@ -136,6 +155,18 @@ days_to_predict = st.sidebar.slider("Forecast Horizon (Days)", 7, 90, 30, key="h
 st.sidebar.markdown("---")
 st.sidebar.subheader("💬 Quick Sentiment")
 user_text = st.sidebar.text_area("Enter news/tweet:", "Bitcoin is looking extremely bullish!", key="sentiment_text")
+if st.sidebar.button("🔍 Analyze Sentiment", use_container_width=True, key="sentiment_sidebar_btn"):
+    score = get_sentiment_score(user_text)
+    if score > 0:
+        label, color, glow = "BULLISH 😊", "#51cf66", "rgba(81,207,102,0.4)"
+    elif score < 0:
+        label, color, glow = "BEARISH 😟", "#ff6b6b", "rgba(255,107,107,0.4)"
+    else:
+        label, color, glow = "NEUTRAL 😐", "#8b949e", "rgba(139,148,158,0.4)"
+    st.session_state["sentiment_result"] = dict(
+        score=score, label=label, border_color=color, glow_color=glow, text=user_text
+    )
+
 
 # ================= TABS =================
 tab1, tab2, tab3, tab4 = st.tabs(["📊 LIVE METRICS", "📈 AI PREDICTIONS", "🧠 SENTIMENT", "🔍 HISTORY SEARCH"])
@@ -192,24 +223,34 @@ with tab2:
 
 # -------------------- TAB 3: SENTIMENT --------------------
 with tab3:
-    if st.sidebar.button("Analyze Sentiment", key="sentiment_btn"):
-        score = TextBlob(user_text).sentiment.polarity
+    st.markdown("<p style='color:#8b949e; font-family:Rajdhani,sans-serif;'></p>", unsafe_allow_html=True)
+
+    # Button lives INSIDE tab3 — result is always visible on the same screen
+    if st.button("🔍 Analyze Sentiment", use_container_width=True, type="primary", key="sentiment_btn"):
+        score = get_sentiment_score(user_text)
         if score > 0:
-            border_color, glow_color, title = "#51cf66", "rgba(81, 207, 102, 0.4)", "BULLISH 😊"
+            border_color, glow_color, label = "#51cf66", "rgba(81, 207, 102, 0.4)", "BULLISH 😊"
         elif score < 0:
-            border_color, glow_color, title = "#ff6b6b", "rgba(255, 107, 107, 0.4)", "BEARISH 😟"
+            border_color, glow_color, label = "#ff6b6b", "rgba(255, 107, 107, 0.4)", "BEARISH 😟"
         else:
-            border_color, glow_color, title = "#8b949e", "rgba(139, 148, 158, 0.4)", "NEUTRAL 😐"
-            
-        sentiment_html = f"""
-        <div style="background: rgba(13, 27, 42, 0.8); padding: 30px; border-radius: 15px; 
-                    border: 2px solid {border_color}; box-shadow: 0 0 30px {glow_color}; text-align: center;">
-            <h1 style="color: {border_color}; font-family: 'Orbitron', sans-serif; margin-bottom: 10px;">{title}</h1>
-            <h2 style="color: white; font-family: 'Orbitron', sans-serif;">Score: {score:.2f}</h2>
-            <p style="color: #8b949e; margin-top: 15px;">"{user_text}"</p>
+            border_color, glow_color, label = "#8b949e", "rgba(139, 148, 158, 0.4)", "NEUTRAL 😐"
+        # Persist result so it survives tab-switching reruns
+        st.session_state["sentiment_result"] = dict(
+            score=score, border_color=border_color,
+            glow_color=glow_color, label=label, text=user_text
+        )
+
+    # Display persisted result (survives reruns / tab switches)
+    if "sentiment_result" in st.session_state:
+        r = st.session_state["sentiment_result"]
+        st.markdown(f"""
+        <div style="background:rgba(13,27,42,0.8);padding:30px;border-radius:15px;
+                    border:2px solid {r['border_color']};box-shadow:0 0 30px {r['glow_color']};text-align:center;margin-top:20px;">
+            <h1 style="color:{r['border_color']};font-family:'Orbitron',sans-serif;margin-bottom:10px;">{r['label']}</h1>
+            <h2 style="color:white;font-family:'Orbitron',sans-serif;">Score: {r['score']:.2f}</h2>
+            <p style="color:#8b949e;margin-top:15px;">"{r['text']}"</p>
         </div>
-        """
-        st.markdown(sentiment_html, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
 
 # -------------------- TAB 4: DATE SEARCH (NUCLEAR FIX) --------------------
 with tab4:
