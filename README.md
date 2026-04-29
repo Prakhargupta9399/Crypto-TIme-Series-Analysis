@@ -1,4 +1,4 @@
-# Crypto-TIme-Series-Analysis
+# Crypto-Time-Series-Analysis
 A futuristic Bitcoin analytics dashboard and prediction engine. Features real-time price tracking, AI-powered forecasting (ARIMA, Prophet, LSTM), and sentiment analysis with a high-end Cyberpunk UI.
 
 ₿ CryptoTime Analytics Engine. CryptoTime Analytics is a full-stack cryptocurrency dashboard that blends data science with a modern web UI. This project not only tracks live Bitcoin statistics but also utilizes a multi-model AI approach to estimate future price trends.
